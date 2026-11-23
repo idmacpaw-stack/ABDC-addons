@@ -1,4 +1,5 @@
 const { addonBuilder } = require("stremio-addon-sdk");
+const subs = require("./subtitles");
 
 const API_KEY = process.env.GDRIVE_API_KEY;
 const FOLDER_ID = process.env.GDRIVE_FOLDER_ID;
@@ -122,10 +123,10 @@ async function getEpisodes() {
 // ---------- Addon ----------
 const manifest = {
   id: "community.abdc.gdrive",
-  version: "1.1.0",
+  version: "1.2.0",
   name: "ABDC Drive",
   description: "America's Best Dance Crew dari Google Drive pribadi",
-  resources: ["catalog", "meta", "stream"],
+  resources: ["catalog", "meta", "stream", "subtitles"],
   types: ["series"],
   idPrefixes: [SERIES_ID],
   catalogs: [{ type: "series", id: "abdc-catalog", name: SERIES_NAME }],
@@ -188,21 +189,61 @@ builder.defineMetaHandler(async ({ id }) => {
   return { meta: { id: SERIES_ID, type: "series", name: SERIES_NAME, videos } };
 });
 
+// File Drive yang cocok untuk satu episode IMDb (memakai mapping.json)
+async function filesFor(season, episode) {
+  const eps = await getEpisodes();
+  const key = `${+season}:${+episode}`;
+  const mapped = MAPPING[key];
+  const targets = mapped === undefined ? [key] : [].concat(mapped);
+  return eps.filter((e) => targets.includes(`${e.season}:${e.episode}`));
+}
+
+// Subtitle dicari berdasarkan nomor episode IMDb (bukan nomor di nama file)
+const subCache = new Map();
+async function subsFor(season, episode, extra = {}) {
+  const k = `${+season}:${+episode}`;
+  const hit = subCache.get(k);
+  if (hit && Date.now() - hit.time < 30 * 60 * 1000) return hit.list;
+  const matches = await filesFor(season, episode);
+  const list = await subs.findSubtitles({
+    imdbId: SERIES_ID, season: +season, episode: +episode,
+    files: matches, extra, apiKey: API_KEY,
+  });
+  if (list.length) subCache.set(k, { time: Date.now(), list });
+  return list;
+}
+
+builder.defineSubtitlesHandler(async ({ id, extra }) => {
+  try {
+    const [prefix, season, episode] = String(id).split(":");
+    if (prefix !== SERIES_ID || !season || !episode) return { subtitles: [] };
+    return { subtitles: await subsFor(season, episode, extra || {}) };
+  } catch (err) {
+    console.warn("Subtitle error:", err.message);
+    return { subtitles: [] };
+  }
+});
+
 builder.defineStreamHandler(async ({ id }) => {
   const [prefix, season, episode] = id.split(":");
   if (prefix !== SERIES_ID) return { streams: [] };
-  const eps = await getEpisodes();
-  const key = `${+season}:${+episode}`;
-  // IMDb S:E -> satu atau beberapa S:E di nama file ([] = sengaja tanpa file)
-  const mapped = MAPPING[key];
-  const targets = mapped === undefined ? [key] : [].concat(mapped);
-  const matches = eps.filter((e) => targets.includes(`${e.season}:${e.episode}`));
+  const matches = await filesFor(season, episode);
+
+  // Sebagian app (mis. Nuvio) memakai subtitle yang ikut di dalam stream.
+  let subtitles = [];
+  if (process.env.STREAM_SUBS !== "0" && matches.length) {
+    subtitles = await Promise.race([
+      subsFor(season, episode).catch(() => []),
+      new Promise((r) => setTimeout(() => r([]), 7000)),
+    ]);
+  }
   return {
     streams: matches.map((e) => ({
       name: "Drive",
       title: e.fileName,
       url: `https://www.googleapis.com/drive/v3/files/${e.fileId}?alt=media&supportsAllDrives=true&key=${API_KEY}`,
-      behaviorHints: { bingeGroup: "abdc-drive" },
+      ...(subtitles.length ? { subtitles } : {}),
+      behaviorHints: { bingeGroup: "abdc-drive", filename: e.fileName },
     })),
   };
 });
@@ -260,4 +301,7 @@ async function debugHtml() {
 
 const addonInterface = builder.getInterface();
 addonInterface.debugHtml = debugHtml;
+addonInterface.filesFor = filesFor;
+addonInterface.SERIES_ID = SERIES_ID;
+addonInterface.API_KEY = API_KEY;
 module.exports = addonInterface;

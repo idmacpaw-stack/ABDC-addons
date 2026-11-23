@@ -232,4 +232,33 @@ async function getSrt(src, key, { s = 1, e = 1 } = {}) {
   return toUtf8(buf);
 }
 
-module.exports = { findSubtitles, getSrt, hashFor, _t: { unzip, pickEntry, toUtf8, b64u } };
+
+// ---------- Diagnosa (dipakai halaman /debug/subs) ----------
+async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
+  const info = {
+    env: {
+      OPENSUBTITLES_API_KEY: !!OS_KEY,
+      OPENSUBTITLES_USERNAME: !!OS_USER,
+      OPENSUBTITLES_PASSWORD: !!OS_PASS,
+      SUBDL_API_KEY: !!SUBDL_KEY,
+      SUB_LANGS: LANGS,
+      publicBase: publicBase(),
+    },
+  };
+  let hash = null;
+  try { for (const f of files.slice(0, 2)) { hash = await hashFor(f, apiKey); if (hash) break; } info.hash = hash || "(tidak ada / dilewati)"; }
+  catch (e) { info.hash = "ERROR: " + e.message; }
+  const brief = (arr) => ({ jumlah: arr.length, contoh: arr.slice(0, 5).map((x) => `${x.lang} | ${x.release} | id ${x.key.slice(0, 20)}`) });
+  try { info.opensubtitles = OS_KEY ? brief(await searchOS({ imdbId, season, episode, hash })) : "API key belum diisi"; }
+  catch (e) { info.opensubtitles = "ERROR: " + e.message; }
+  try { info.subdl = SUBDL_KEY ? brief(await searchSubdl({ imdbId, season, episode })) : "API key belum diisi"; }
+  catch (e) { info.subdl = "ERROR: " + e.message; }
+  if (OS_KEY && OS_USER && OS_PASS) {
+    try { await osLogin(); info.opensubtitles_login = "OK"; } catch (e) { info.opensubtitles_login = "ERROR: " + e.message; }
+  } else info.opensubtitles_login = "username/password belum diisi (unduhan OpenSubtitles akan gagal)";
+  try { info.hasil_akhir = await findSubtitles({ imdbId, season, episode, files, apiKey }); }
+  catch (e) { info.hasil_akhir = "ERROR: " + e.message; }
+  return info;
+}
+
+module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { unzip, pickEntry, toUtf8, b64u } };
