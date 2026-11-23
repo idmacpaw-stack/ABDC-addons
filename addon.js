@@ -302,6 +302,7 @@ async function debugHtml() {
 const addonInterface = builder.getInterface();
 addonInterface.debugHtml = debugHtml;
 addonInterface.filesFor = filesFor;
+addonInterface.getCinemeta = getCinemeta;
 addonInterface.SERIES_ID = SERIES_ID;
 addonInterface.API_KEY = API_KEY;
 module.exports = addonInterface;

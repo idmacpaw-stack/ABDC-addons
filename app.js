@@ -2,7 +2,7 @@
 const express = require("express");
 const { getRouter } = require("stremio-addon-sdk");
 const addonInterface = require("./addon");
-const { getSrt, diagnose } = require("./subtitles");
+const { getSrt, diagnose, scanEpisode, scanSeason } = require("./subtitles");
 
 const app = express();
 const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -22,6 +22,53 @@ app.get("/debug/subs", async (req, res) => {
     const files = await addonInterface.filesFor(s, e);
     const info = await diagnose({ imdbId: addonInterface.SERIES_ID, season: s, episode: e, files, apiKey: addonInterface.API_KEY });
     res.type("html").send(page(`Episode IMDb S${s}E${e} | file Drive cocok: ${files.length}\n\n` + JSON.stringify(info, null, 2)));
+  } catch (err) { res.status(500).send(page(String(err.stack || err))); }
+});
+
+
+// Pindai subtitle seluruh episode IMDb: /debug/subs-all (daftar season) atau /debug/subs-all?s=1
+async function pool(items, size, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
+const html = (body) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:14px/1.5 system-ui,sans-serif;padding:12px}table{border-collapse:collapse}td,th{border:1px solid #8884;padding:4px 8px;text-align:left}.ok{background:#2a73}.no{opacity:.6}a{margin-right:10px}</style>${body}`;
+
+app.get("/debug/subs-all", async (req, res) => {
+  try {
+    const cm = await addonInterface.getCinemeta();
+    const vids = ((cm && cm.videos) || [])
+      .map((v) => ({ season: +v.season, episode: +(v.episode ?? v.number), title: v.name || v.title || "", date: v.released ? String(v.released).slice(0, 10) : "" }))
+      .filter((v) => v.season > 0 && v.episode > 0)
+      .sort((a, b) => a.season - b.season || a.episode - b.episode);
+    if (!vids.length) return res.type("html").send(html("Metadata episode (Cinemeta) gagal diambil. Coba lagi sebentar lagi."));
+    const seasons = [...new Set(vids.map((v) => v.season))];
+    const nav = seasons.map((n) => `<a href="?s=${n}">Season ${n} (${vids.filter((v) => v.season === n).length} ep)</a>`).join("");
+    const s = req.query.s ? +req.query.s : null;
+    if (s == null) return res.type("html").send(html(`<h3>Pindai subtitle per season</h3><p>Pilih season (tiap season dipindai ke SubDL dan OpenSubtitles):</p><p>${nav}</p>`));
+
+    const list = vids.filter((v) => v.season === s);
+    const [sea, rows] = await Promise.all([
+      scanSeason({ imdbId: addonInterface.SERIES_ID, season: s }),
+      pool(list, 6, async (v) => ({
+        v,
+        r: await scanEpisode({ imdbId: addonInterface.SERIES_ID, season: v.season, episode: v.episode }),
+        files: (await addonInterface.filesFor(v.season, v.episode)).length,
+      })),
+    ]);
+    const withSub = rows.filter((x) => (+x.r.strem || 0) + (+x.r.subdl || 0) > 0).length;
+    const tr = rows.map(({ v, r, files }) => {
+      const has = (+r.strem || 0) + (+r.subdl || 0) > 0;
+      return `<tr class="${has ? "ok" : "no"}"><td>S${v.season}E${v.episode}</td><td>${esc(v.date)}</td><td>${esc(v.title)}</td><td>${files}</td><td>${r.strem}</td><td>${r.subdl}</td><td>${esc(r.langs.join(", "))}</td><td>${esc(r.err.join("; "))}</td></tr>`;
+    }).join("");
+    res.type("html").send(html(
+      `<p>${nav}</p><h3>Season ${s}: ${withSub} dari ${rows.length} episode punya subtitle</h3>` +
+      `<p>Paket season di SubDL: ${sea.packs}${sea.langs && sea.langs.length ? " (" + esc(sea.langs.join(", ")) + ")" : ""}${sea.err ? " — " + esc(sea.err) : ""}</p>` +
+      `<table><tr><th>Episode</th><th>Tayang</th><th>Judul</th><th>File Drive</th><th>OpenSubtitles (Stremio)</th><th>SubDL</th><th>Bahasa</th><th>Error</th></tr>${tr}</table>`
+    ));
   } catch (err) { res.status(500).send(page(String(err.stack || err))); }
 });
 

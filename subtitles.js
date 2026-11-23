@@ -355,4 +355,37 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
   return info;
 }
 
-module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { searchStrem, unzip, pickEntry, toUtf8, b64u, searchSubdl } };
+
+// ---------- Pemindaian untuk /debug/subs-all (tanpa hash Drive, ringan) ----------
+async function scanEpisode({ imdbId, season, episode }) {
+  const out = { strem: "-", subdl: "-", langs: [], err: [] };
+  const langs = new Set();
+  await Promise.all([
+    (async () => {
+      if (!STREM_OS) return;
+      try { const l = await searchStrem({ imdbId, season, episode }); out.strem = l.length; l.forEach((x) => langs.add(x.lang)); }
+      catch (e) { out.strem = "ERR"; out.err.push("Stremio: " + e.message); }
+    })(),
+    (async () => {
+      if (!SUBDL_KEY) return;
+      try {
+        const d = await subdlQuery({ imdb_id: imdbId, type: "tv", season_number: String(season), episode_number: String(episode) });
+        const l = mapSubdl(d, season, episode); out.subdl = l.length; l.forEach((x) => langs.add(x.lang));
+      } catch (e) { out.subdl = "ERR"; out.err.push("SubDL: " + e.message); }
+    })(),
+  ]);
+  out.langs = [...langs];
+  return out;
+}
+
+// Paket satu season di SubDL (ZIP berisi banyak episode)
+async function scanSeason({ imdbId, season }) {
+  if (!SUBDL_KEY) return { packs: "-", langs: [] };
+  try {
+    const d = await subdlQuery({ imdb_id: imdbId, type: "tv", season_number: String(season) });
+    const packs = (d.subtitles || []).filter((x) => x.url && !(+x.episode) && (!(+x.season) || +x.season === +season));
+    return { packs: packs.length, langs: [...new Set(packs.map((x) => normLang(x.language || x.lang)))], total: (d.subtitles || []).length };
+  } catch (e) { return { packs: "ERR", langs: [], err: e.message }; }
+}
+
+module.exports = { scanEpisode, scanSeason, findSubtitles, getSrt, hashFor, diagnose, _t: { searchStrem, unzip, pickEntry, toUtf8, b64u, searchSubdl } };
