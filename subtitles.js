@@ -7,12 +7,18 @@ const OS_KEY = process.env.OPENSUBTITLES_API_KEY;
 const OS_USER = process.env.OPENSUBTITLES_USERNAME;
 const OS_PASS = process.env.OPENSUBTITLES_PASSWORD;
 const SUBDL_KEY = process.env.SUBDL_API_KEY;
-const LANGS = (process.env.SUB_LANGS || "id,en").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+// SUB_LANGS: "all" (default) = semua bahasa; atau daftar mis. "id,en" untuk membatasi.
+const _langEnv = (process.env.SUB_LANGS || "all").trim().toLowerCase();
+const ANY_LANG = _langEnv === "all" || _langEnv === "*";
+const LANGS = ANY_LANG ? [] : _langEnv.split(",").map((x) => x.trim()).filter(Boolean);
+// Bahasa yang ditaruh paling atas (urutan) saat ANY_LANG; bahasa lain ditaruh sesudahnya
+const PREFER = (process.env.PREFER_LANGS || "id,en").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+const OTHER_PER_LANG = +(process.env.OTHER_PER_LANG || 1);
 const PER_LANG = +(process.env.SUBS_PER_LANG || 3);
 const NO_HASH = !!process.env.NO_HASH;
 
 // Stremio memakai kode bahasa 3 huruf (ISO 639-2)
-const LANG3 = { en: "eng", id: "ind", ms: "may", es: "spa", pt: "por", fr: "fre", de: "ger", ar: "ara", ja: "jpn", ko: "kor", zh: "chi", th: "tha", vi: "vie" };
+const LANG3 = { en: "eng", id: "ind", ms: "may", es: "spa", pt: "por", fr: "fre", de: "ger", ar: "ara", ja: "jpn", ko: "kor", zh: "chi", th: "tha", vi: "vie", it: "ita", ru: "rus", tr: "tur", nl: "dut", pl: "pol", sv: "swe", da: "dan", fi: "fin", no: "nor", el: "gre", he: "heb", hi: "hin", fa: "per", ro: "rum", hu: "hun", cs: "cze", bg: "bul", hr: "hrv", sr: "srp", uk: "ukr", bn: "ben", sk: "slo", sl: "slv", lt: "lit", lv: "lav", et: "est", ta: "tam", te: "tel", ur: "urd", fil: "fil", tl: "tgl" };
 const LANG_NAMES = { indonesian: "id", english: "en", malay: "ms", spanish: "es", portuguese: "pt", french: "fr", german: "de", arabic: "ar", japanese: "ja", korean: "ko", chinese: "zh", thai: "th", vietnamese: "vi" };
 
 const b64u = (s) => Buffer.from(s, "utf8").toString("base64url");
@@ -67,7 +73,8 @@ function normLang(x) {
 
 async function searchOS({ imdbId, season, episode, hash }) {
   if (!OS_KEY) return [];
-  const q = { episode_number: episode, languages: LANGS.join(","), parent_imdb_id: imdbId.replace(/^tt/, ""), season_number: season, type: "episode" };
+  const q = { episode_number: episode, parent_imdb_id: imdbId.replace(/^tt/, ""), season_number: season, type: "episode" };
+  if (LANGS.length) q.languages = LANGS.join(",");
   if (hash) q.moviehash = hash;
   const qs = Object.keys(q).sort().map((k) => `${k}=${encodeURIComponent(q[k])}`).join("&");
   const r = await fetchT(`https://api.opensubtitles.com/api/v1/subtitles?${qs}`, { headers: { "Api-Key": OS_KEY, "User-Agent": UA, Accept: "application/json" } });
@@ -84,7 +91,8 @@ async function searchOS({ imdbId, season, episode, hash }) {
 const SERIES_QUERY_NAME = "America's Best Dance Crew";
 
 async function subdlQuery(extra) {
-  const p = new URLSearchParams({ api_key: SUBDL_KEY, languages: LANGS.map((l) => l.toUpperCase()).join(","), subs_per_page: "30", ...extra });
+  const p = new URLSearchParams({ api_key: SUBDL_KEY, subs_per_page: "30", ...extra });
+  if (LANGS.length) p.set("languages", LANGS.map((l) => l.toUpperCase()).join(","));
   const r = await fetchT(`https://api.subdl.com/api/v1/subtitles?${p}`, { headers: { "User-Agent": UA } });
   const text = await r.text();
   let d;
@@ -157,14 +165,21 @@ async function findSubtitles({ imdbId, season, episode, files = [], extra = {}, 
   ]);
 
   const seen = new Set();
-  const all = [...os, ...sd].filter((c) => LANGS.includes(c.lang) && !seen.has(c.src + c.key) && seen.add(c.src + c.key));
+  const all = [...os, ...sd].filter((c) => (!LANGS.length || LANGS.includes(c.lang)) && !seen.has(c.src + c.key) && seen.add(c.src + c.key));
   for (const c of all) c.score = Math.max(0, ...names.map((n) => sim(c.release, n)));
   all.sort((a, b) => (b.hashMatch - a.hashMatch) || (b.score - a.score) || (b.downloads - a.downloads));
 
   const base = publicBase();
   const out = [];
-  for (const lang of LANGS) {
-    for (const c of all.filter((x) => x.lang === lang).slice(0, PER_LANG)) {
+  let order;
+  if (ANY_LANG) {
+    const found = [...new Set(all.map((c) => c.lang))];
+    const rest = found.filter((l) => !PREFER.includes(l)).sort();
+    order = [...PREFER.filter((l) => found.includes(l)), ...rest];
+  } else order = LANGS;
+  for (const lang of order) {
+    const limit = ANY_LANG && !PREFER.includes(lang) ? OTHER_PER_LANG : PER_LANG;
+    for (const c of all.filter((x) => x.lang === lang).slice(0, limit)) {
       out.push({ id: `${c.src}-${c.key}`, url: `${base}/sub/${c.src}/${c.key}.srt?s=${season}&e=${episode}`, lang: LANG3[lang] || lang });
     }
   }
@@ -275,7 +290,7 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
       OPENSUBTITLES_USERNAME: !!OS_USER,
       OPENSUBTITLES_PASSWORD: !!OS_PASS,
       SUBDL_API_KEY: !!SUBDL_KEY,
-      SUB_LANGS: LANGS,
+      SUB_LANGS: ANY_LANG ? "semua bahasa" : LANGS,
       publicBase: publicBase(),
     },
   };
