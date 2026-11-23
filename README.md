@@ -11,7 +11,7 @@ Subtitle (isi salah satu atau keduanya):
 - `SUBDL_API_KEY` – API key dari subdl.com (cukup ini saja sudah jalan)
 - `OPENSUBTITLES_API_KEY`, `OPENSUBTITLES_USERNAME`, `OPENSUBTITLES_PASSWORD` – ketiganya wajib untuk OpenSubtitles (unduhan butuh login)
 
-Opsional: `SUB_LANGS` (default `all` = semua bahasa; atau batasi mis. `id,en`), `PREFER_LANGS` (default `id,en`, ditaruh paling atas), `OTHER_PER_LANG` (default 1), `SUBS_PER_LANG` (default 3), `PUBLIC_URL`, `NO_HASH=1`, `STREAM_SUBS=1` (sisipkan subtitle di dalam stream; default mati karena memperlambat stream).
+Opsional: `THUMB_SOURCE` (`auto` default / `drive` / `cinemeta`, sumber thumbnail episode), `SUB_LANGS` (default `all` = semua bahasa; atau batasi mis. `id,en`), `PREFER_LANGS` (default `id,en`, ditaruh paling atas), `OTHER_PER_LANG` (default 1), `SUBS_PER_LANG` (default 3), `PUBLIC_URL`, `NO_HASH=1`, `STREAM_SUBS=1` (sisipkan subtitle di dalam stream; default mati karena memperlambat stream).
 
 ## Jalankan lokal
     npm install

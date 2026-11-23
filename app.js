@@ -72,6 +72,53 @@ app.get("/debug/subs-all", async (req, res) => {
   } catch (err) { res.status(500).send(page(String(err.stack || err))); }
 });
 
+
+// Thumbnail video dari Drive: /thumb/<fileId>.jpg  (kalau tidak ada -> background serial)
+const thumbCache = new Map();
+app.get("/thumb/:id", async (req, res) => {
+  const id = req.params.id.replace(/\.(jpg|jpeg|png)$/i, "");
+  const send = (buf, type) => {
+    res.setHeader("Content-Type", type || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=21600");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.send(buf);
+  };
+  try {
+    if (!/^[\w-]{10,}$/.test(id)) throw new Error("id tidak valid");
+    const hit = thumbCache.get(id);
+    if (hit && Date.now() - hit.t < 6 * 3600 * 1000) return send(hit.buf, hit.type);
+    const meta = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=thumbnailLink&supportsAllDrives=true&key=${addonInterface.API_KEY}`);
+    const link = meta.ok ? (await meta.json()).thumbnailLink : null;
+    if (link) {
+      const img = await fetch(link.replace(/=s\d+.*$/, "=s640"));
+      if (img.ok) {
+        const buf = Buffer.from(await img.arrayBuffer());
+        const type = img.headers.get("content-type") || "image/jpeg";
+        thumbCache.set(id, { buf, type, t: Date.now() });
+        return send(buf, type);
+      }
+    }
+    throw new Error("Drive belum punya thumbnail untuk file ini");
+  } catch (err) {
+    const cm = await addonInterface.getCinemeta().catch(() => null);
+    const bg = cm && (cm.background || cm.poster);
+    res.setHeader("Cache-Control", "public, max-age=300");
+    if (bg) return res.redirect(302, bg);
+    res.status(404).type("text/plain").send(err.message);
+  }
+});
+
+// Galeri cek thumbnail: /debug/thumbs?s=7
+app.get("/debug/thumbs", async (req, res) => {
+  try {
+    const s = +req.query.s || 1;
+    const meta = await addonInterface.metaFor(addonInterface.SERIES_ID);
+    const vids = ((meta.meta && meta.meta.videos) || []).filter((v) => +v.season === s).sort((a, b) => a.episode - b.episode);
+    const cards = vids.map((v) => `<div style="display:inline-block;margin:6px;width:220px;vertical-align:top"><div style="height:124px;background:#8883"><img src="${esc(v.thumbnail || "")}" loading="lazy" width="220" height="124" style="object-fit:cover"></div><small>S${v.season}E${v.episode}</small><br><small style="word-break:break-all;opacity:.6">${esc((v.thumbnail || "(kosong)").slice(0, 80))}</small></div>`).join("");
+    res.type("html").send(html(`<h3>Thumbnail Season ${s} (${vids.length} episode)</h3><p>Ganti season: ?s=1, ?s=2, ...</p>${cards}`));
+  } catch (err) { res.status(500).send(page(String(err.stack || err))); }
+});
+
 // Unduh + konversi subtitle jadi .srt UTF-8 (URL ini yang diberikan ke Stremio/Nuvio)
 app.get("/sub/:src/:file", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");

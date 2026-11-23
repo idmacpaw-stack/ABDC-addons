@@ -388,4 +388,4 @@ async function scanSeason({ imdbId, season }) {
   } catch (e) { return { packs: "ERR", langs: [], err: e.message }; }
 }
 
-module.exports = { scanEpisode, scanSeason, findSubtitles, getSrt, hashFor, diagnose, _t: { searchStrem, unzip, pickEntry, toUtf8, b64u, searchSubdl } };
+module.exports = { publicBase, scanEpisode, scanSeason, findSubtitles, getSrt, hashFor, diagnose, _t: { searchStrem, unzip, pickEntry, toUtf8, b64u, searchSubdl } };
