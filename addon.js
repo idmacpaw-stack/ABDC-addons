@@ -2,8 +2,10 @@ const { addonBuilder } = require("stremio-addon-sdk");
 
 const API_KEY = process.env.GDRIVE_API_KEY;
 const FOLDER_ID = process.env.GDRIVE_FOLDER_ID;
-const SERIES_ID = "abdc";
+const SERIES_ID = "tt1145872"; // IMDb ID America's Best Dance Crew
 const SERIES_NAME = "America's Best Dance Crew";
+let MAPPING = {};
+try { MAPPING = require("./mapping.json"); } catch (e) { /* tanpa mapping */ }
 const VIDEO_EXT = /\.(mkv|mp4|avi|mov|m4v|webm|rmvb|3gp|flv|wmv|mpg|mpeg|ts)$/i;
 
 if (!API_KEY || !FOLDER_ID) {
@@ -120,7 +122,7 @@ async function getEpisodes() {
 // ---------- Addon ----------
 const manifest = {
   id: "community.abdc.gdrive",
-  version: "1.0.0",
+  version: "1.1.0",
   name: "ABDC Drive",
   description: "America's Best Dance Crew dari Google Drive pribadi",
   resources: ["catalog", "meta", "stream"],
@@ -131,12 +133,45 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-builder.defineCatalogHandler(async () => ({
-  metas: [{ id: SERIES_ID, type: "series", name: SERIES_NAME }],
-}));
+// ---------- Metadata IMDb (via Cinemeta, sumber metadata bawaan Stremio) ----------
+let metaCache = { time: 0, meta: null };
+async function getCinemeta() {
+  if (Date.now() - metaCache.time < 24 * 60 * 60 * 1000 && metaCache.meta) return metaCache.meta;
+  try {
+    const res = await fetch(`https://v3-cinemeta.strem.io/meta/series/${SERIES_ID}.json`);
+    if (!res.ok) throw new Error(`Cinemeta ${res.status}`);
+    const data = await res.json();
+    if (data && data.meta) {
+      metaCache = { time: Date.now(), meta: data.meta };
+      return data.meta;
+    }
+  } catch (err) {
+    console.warn("Gagal ambil metadata Cinemeta:", err.message);
+  }
+  return metaCache.meta; // bisa null -> pakai fallback dari daftar file
+}
+
+builder.defineCatalogHandler(async () => {
+  const cm = await getCinemeta();
+  return {
+    metas: [{
+      id: SERIES_ID,
+      type: "series",
+      name: (cm && cm.name) || SERIES_NAME,
+      poster: cm && cm.poster,
+      description: cm && cm.description,
+    }],
+  };
+});
 
 builder.defineMetaHandler(async ({ id }) => {
   if (id !== SERIES_ID) return { meta: null };
+
+  // 1) Utamakan metadata IMDb/Cinemeta: poster, deskripsi, daftar episode & judulnya
+  const cm = await getCinemeta();
+  if (cm) return { meta: { ...cm, id: SERIES_ID, type: "series" } };
+
+  // 2) Fallback: daftar episode dari nama file di Drive
   const eps = await getEpisodes();
   const seen = new Map();
   for (const e of eps) {
@@ -148,7 +183,6 @@ builder.defineMetaHandler(async ({ id }) => {
     title: e.label,
     season: e.season,
     episode: e.episode,
-    // Stremio butuh tanggal rilis untuk mengurutkan; ini hanya penanda urutan
     released: new Date(Date.UTC(2000 + e.season, 0, e.episode)).toISOString(),
   }));
   return { meta: { id: SERIES_ID, type: "series", name: SERIES_NAME, videos } };
@@ -158,7 +192,9 @@ builder.defineStreamHandler(async ({ id }) => {
   const [prefix, season, episode] = id.split(":");
   if (prefix !== SERIES_ID) return { streams: [] };
   const eps = await getEpisodes();
-  const matches = eps.filter((e) => e.season === +season && e.episode === +episode);
+  const key = `${+season}:${+episode}`;
+  const target = MAPPING[key] || key; // IMDb S:E -> S:E di nama file
+  const matches = eps.filter((e) => `${e.season}:${e.episode}` === target);
   return {
     streams: matches.map((e) => ({
       name: "Drive",
@@ -169,4 +205,53 @@ builder.defineStreamHandler(async ({ id }) => {
   };
 });
 
-module.exports = builder.getInterface();
+async function debugHtml() {
+  const [eps, cm] = await Promise.all([getEpisodes(), getCinemeta()]);
+  const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const files = new Map();
+  for (const e of eps) {
+    const k = `${e.season}:${e.episode}`;
+    if (!files.has(k)) files.set(k, []);
+    files.get(k).push(e.fileName);
+  }
+  const imdb = ((cm && cm.videos) || [])
+    .map((v) => ({
+      season: +v.season,
+      episode: +(v.episode ?? v.number),
+      title: v.name || v.title || "",
+      date: v.released ? String(v.released).slice(0, 10) : "",
+    }))
+    .sort((a, b) => a.season - b.season || a.episode - b.episode);
+
+  const out = [];
+  out.push(`Metadata IMDb/Cinemeta: ${cm ? "OK (" + imdb.length + " episode)" : "GAGAL DIAMBIL"}`);
+  out.push(`File video terbaca: ${eps.length}`, "");
+
+  const seasons = [...new Set([...imdb.map((v) => v.season), ...eps.map((e) => e.season)])].sort((a, b) => a - b);
+  out.push("== RINGKASAN PER SEASON ==");
+  for (const s of seasons) {
+    const ni = imdb.filter((v) => v.season === s && v.episode > 0).length;
+    const nf = new Set(eps.filter((e) => e.season === s).map((e) => e.episode)).size;
+    out.push(`Season ${s}: IMDb ${ni} episode | file ${nf} episode ${ni === nf ? "(jumlah sama)" : "(JUMLAH BEDA)"}`);
+  }
+
+  out.push("", "== EPISODE IMDb -> FILE ==");
+  for (const v of imdb) {
+    const k = `${v.season}:${v.episode}`;
+    const target = MAPPING[k] || k;
+    const f = files.get(target);
+    const note = MAPPING[k] ? ` [mapping ${k} -> ${target}]` : "";
+    out.push(`S${v.season}E${v.episode} | ${v.date} | ${v.title}${note}\n     ${f ? f.join("\n     ") : "(TIDAK ADA FILE)"}`);
+  }
+
+  const used = new Set(imdb.map((v) => MAPPING[`${v.season}:${v.episode}`] || `${v.season}:${v.episode}`));
+  out.push("", "== FILE YANG TIDAK DIPAKAI EPISODE IMDb MANA PUN ==");
+  for (const k of files.keys()) {
+    if (!used.has(k)) out.push(`S${k.replace(":", "E")}: ${files.get(k).join(" | ")}`);
+  }
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ABDC debug</title><pre style="white-space:pre-wrap;font:13px/1.5 monospace;padding:12px">${esc(out.join("\n"))}</pre>`;
+}
+
+const addonInterface = builder.getInterface();
+addonInterface.debugHtml = debugHtml;
+module.exports = addonInterface;
