@@ -81,17 +81,51 @@ async function searchOS({ imdbId, season, episode, hash }) {
   }).filter(Boolean);
 }
 
+const SERIES_QUERY_NAME = "America's Best Dance Crew";
+
+async function subdlQuery(extra) {
+  const p = new URLSearchParams({ api_key: SUBDL_KEY, languages: LANGS.map((l) => l.toUpperCase()).join(","), subs_per_page: "30", ...extra });
+  const r = await fetchT(`https://api.subdl.com/api/v1/subtitles?${p}`, { headers: { "User-Agent": UA } });
+  const text = await r.text();
+  let d;
+  try { d = JSON.parse(text); } catch { throw new Error(`SUBDL cari ${r.status}: ${text.slice(0, 120)}`); }
+  if (!r.ok || d.status === false) throw new Error(`SUBDL ${r.status}: ${d.error || text.slice(0, 120)}`);
+  return d;
+}
+
+// Beberapa cara cari, dicoba berurutan sampai ada hasil
+function subdlVariants({ imdbId, season, episode }) {
+  const S = String(season), E = String(episode);
+  return [
+    { name: "imdb + episode", p: { imdb_id: imdbId, type: "tv", season_number: S, episode_number: E } },
+    { name: "imdb + season (termasuk paket season)", p: { imdb_id: imdbId, type: "tv", season_number: S } },
+    { name: "nama + episode", p: { film_name: SERIES_QUERY_NAME, type: "tv", season_number: S, episode_number: E } },
+    { name: "nama + season", p: { film_name: SERIES_QUERY_NAME, type: "tv", season_number: S } },
+  ];
+}
+
+function mapSubdl(d, season, episode) {
+  return (d.subtitles || []).filter((x) => {
+    if (!x.url) return false;
+    const sn = +x.season, ep = +x.episode;
+    if (sn && sn !== +season) return false;      // season lain
+    if (ep && ep !== +episode) return false;       // episode lain (paket season: ep kosong/0)
+    return true;
+  }).map((x) => ({ src: "subdl", key: b64u(x.url), lang: normLang(x.language || x.lang), release: x.release_name || x.name || "", hashMatch: false, downloads: 0 }));
+}
+
 async function searchSubdl({ imdbId, season, episode }) {
   if (!SUBDL_KEY) return [];
-  const p = new URLSearchParams({ api_key: SUBDL_KEY, imdb_id: imdbId, type: "tv", season_number: String(season), episode_number: String(episode), languages: LANGS.map((l) => l.toUpperCase()).join(","), subs_per_page: "30" });
-  const r = await fetchT(`https://api.subdl.com/api/v1/subtitles?${p}`, { headers: { "User-Agent": UA } });
-  if (!r.ok) throw new Error(`SUBDL cari ${r.status}`);
-  const d = await r.json();
-  if (d.status === false) throw new Error(`SUBDL: ${d.error || "gagal"}`);
-  return (d.subtitles || []).map((x) => {
-    if (!x.url) return null;
-    return { src: "subdl", key: b64u(x.url), lang: normLang(x.language || x.lang), release: x.release_name || x.name || "", hashMatch: false, downloads: 0 };
-  }).filter(Boolean);
+  let firstErr = null, ok = false;
+  for (const v of subdlVariants({ imdbId, season, episode })) {
+    try {
+      const list = mapSubdl(await subdlQuery(v.p), season, episode);
+      ok = true;
+      if (list.length) return list;
+    } catch (e) { firstErr = firstErr || e; }
+  }
+  if (!ok && firstErr) throw firstErr;
+  return [];
 }
 
 // Kemiripan nama rilis subtitle dengan nama file kita (grup rilis, kualitas, dsb.)
@@ -204,7 +238,7 @@ function pickEntry(entries, s, e) {
     const hit = srt.find((x) => p.test(x.name));
     if (hit) return hit;
   }
-  return srt[0];
+  throw new Error(`Paket subtitle berisi ${srt.length} file tapi tidak ada yang cocok untuk S${s}E${e}`);
 }
 
 function toUtf8(buf) {
@@ -251,8 +285,24 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
   const brief = (arr) => ({ jumlah: arr.length, contoh: arr.slice(0, 5).map((x) => `${x.lang} | ${x.release} | id ${x.key.slice(0, 20)}`) });
   try { info.opensubtitles = OS_KEY ? brief(await searchOS({ imdbId, season, episode, hash })) : "API key belum diisi"; }
   catch (e) { info.opensubtitles = "ERROR: " + e.message; }
-  try { info.subdl = SUBDL_KEY ? brief(await searchSubdl({ imdbId, season, episode })) : "API key belum diisi"; }
-  catch (e) { info.subdl = "ERROR: " + e.message; }
+  if (!SUBDL_KEY) info.subdl = "API key belum diisi";
+  else {
+    info.subdl = [];
+    for (const v of subdlVariants({ imdbId, season, episode })) {
+      try {
+        const d = await subdlQuery(v.p);
+        const mapped = mapSubdl(d, season, episode);
+        info.subdl.push({
+          cara: v.name,
+          status: d.status,
+          media_dikenali: (d.results || []).slice(0, 3).map((x) => `${x.name} (${x.imdb_id || "?"}) ${x.type || ""} ${x.year || ""}`),
+          subtitle_mentah: (d.subtitles || []).length,
+          lolos_filter: mapped.length,
+          contoh: mapped.slice(0, 3).map((x) => `${x.lang} | ${x.release}`),
+        });
+      } catch (e) { info.subdl.push({ cara: v.name, error: e.message }); }
+    }
+  }
   if (OS_KEY && OS_USER && OS_PASS) {
     try { await osLogin(); info.opensubtitles_login = "OK"; } catch (e) { info.opensubtitles_login = "ERROR: " + e.message; }
   } else info.opensubtitles_login = "username/password belum diisi (unduhan OpenSubtitles akan gagal)";
@@ -261,4 +311,4 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
   return info;
 }
 
-module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { unzip, pickEntry, toUtf8, b64u } };
+module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { unzip, pickEntry, toUtf8, b64u, searchSubdl } };
