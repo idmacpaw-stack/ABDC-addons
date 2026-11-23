@@ -229,9 +229,9 @@ builder.defineStreamHandler(async ({ id }) => {
   if (prefix !== SERIES_ID) return { streams: [] };
   const matches = await filesFor(season, episode);
 
-  // Sebagian app (mis. Nuvio) memakai subtitle yang ikut di dalam stream.
+  // Opsional (STREAM_SUBS=1): sisipkan subtitle di dalam stream. Default mati agar stream langsung muncul.
   let subtitles = [];
-  if (process.env.STREAM_SUBS !== "0" && matches.length) {
+  if (process.env.STREAM_SUBS === "1" && matches.length) { // default MATI: bikin stream lambat
     subtitles = await Promise.race([
       subsFor(season, episode).catch(() => []),
       new Promise((r) => setTimeout(() => r([]), 7000)),
