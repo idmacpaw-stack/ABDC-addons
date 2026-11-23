@@ -88,6 +88,30 @@ async function searchOS({ imdbId, season, episode, hash }) {
   }).filter(Boolean);
 }
 
+// ---------- OpenSubtitles lewat addon resmi Stremio (tanpa API key) ----------
+const STREM_OS = process.env.STREM_OS !== "0";
+const STREM_BASE = (process.env.STREM_OS_URL || "https://opensubtitles-v3.strem.io").replace(/\/$/, "");
+const REV3 = Object.fromEntries(Object.entries(LANG3).map(([k, v]) => [v, k]));
+Object.assign(REV3, { deu: "de", fra: "fr", zho: "zh", fas: "fa", nld: "nl", ell: "el", ron: "ro", ces: "cs", slk: "sk", msa: "ms", pob: "pt", pom: "pt", por: "pt", zhc: "zh", zht: "zh", scc: "sr", spl: "es", spn: "es" });
+const lang3to2 = (l) => REV3[String(l || "").toLowerCase()] || String(l || "").toLowerCase();
+
+async function searchStrem({ imdbId, season, episode, hash, size, filename }) {
+  if (!STREM_OS) return [];
+  const extra = [];
+  if (hash) extra.push(`videoHash=${hash}`);
+  if (size) extra.push(`videoSize=${size}`);
+  if (filename) extra.push(`filename=${encodeURIComponent(filename)}`);
+  const id = `${imdbId}:${season}:${episode}`;
+  const url = `${STREM_BASE}/subtitles/series/${id}${extra.length ? "/" + extra.join("&") : ""}.json`;
+  const r = await fetchT(url, { headers: { "User-Agent": UA, Accept: "application/json" } }, 12000);
+  if (!r.ok) throw new Error(`Stremio OpenSubtitles ${r.status}`);
+  const d = await r.json();
+  return (d.subtitles || []).filter((x) => x && x.url).map((x) => ({
+    src: "strem", key: x.url, url: x.url, lang: lang3to2(x.lang),
+    release: x.id ? String(x.id) : "", hashMatch: false, downloads: 0,
+  }));
+}
+
 const SERIES_QUERY_NAME = "America's Best Dance Crew";
 
 async function subdlQuery(extra) {
@@ -148,24 +172,26 @@ function sim(release, name) {
 }
 
 async function findSubtitles({ imdbId, season, episode, files = [], extra = {}, apiKey }) {
-  if (!OS_KEY && !SUBDL_KEY) return [];
+  if (!OS_KEY && !SUBDL_KEY && !STREM_OS) return [];
   const names = [extra.filename, ...files.map((f) => f.fileName)].filter(Boolean);
 
   let hash = extra.videoHash || null;
+  let size = extra.videoSize || null;
   if (!hash) {
     for (const f of files.slice(0, 2)) {
       hash = await hashFor(f, apiKey).catch(() => null);
-      if (hash) break;
+      if (hash) { size = f.size; break; }
     }
   }
 
-  const [os, sd] = await Promise.all([
+  const [st, os, sd] = await Promise.all([
+    searchStrem({ imdbId, season, episode, hash, size, filename: names[0] }).catch((e) => (console.warn(e.message), [])),
     searchOS({ imdbId, season, episode, hash }).catch((e) => (console.warn(e.message), [])),
     searchSubdl({ imdbId, season, episode }).catch((e) => (console.warn(e.message), [])),
   ]);
 
   const seen = new Set();
-  const all = [...os, ...sd].filter((c) => (!LANGS.length || LANGS.includes(c.lang)) && !seen.has(c.src + c.key) && seen.add(c.src + c.key));
+  const all = [...st, ...os, ...sd].filter((c) => (!LANGS.length || LANGS.includes(c.lang)) && !seen.has(c.src + c.key) && seen.add(c.src + c.key));
   for (const c of all) c.score = Math.max(0, ...names.map((n) => sim(c.release, n)));
   all.sort((a, b) => (b.hashMatch - a.hashMatch) || (b.score - a.score) || (b.downloads - a.downloads));
 
@@ -180,7 +206,7 @@ async function findSubtitles({ imdbId, season, episode, files = [], extra = {}, 
   for (const lang of order) {
     const limit = ANY_LANG && !PREFER.includes(lang) ? OTHER_PER_LANG : PER_LANG;
     for (const c of all.filter((x) => x.lang === lang).slice(0, limit)) {
-      out.push({ id: `${c.src}-${c.key}`, url: `${base}/sub/${c.src}/${c.key}.srt?s=${season}&e=${episode}`, lang: LANG3[lang] || lang });
+      out.push({ id: `${c.src}-${c.key}`.slice(0, 120), url: c.src === "strem" ? c.url : `${base}/sub/${c.src}/${c.key}.srt?s=${season}&e=${episode}`, lang: LANG3[lang] || lang });
     }
   }
   return out;
@@ -290,6 +316,7 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
       OPENSUBTITLES_USERNAME: !!OS_USER,
       OPENSUBTITLES_PASSWORD: !!OS_PASS,
       SUBDL_API_KEY: !!SUBDL_KEY,
+      STREM_OS_AKTIF: STREM_OS,
       SUB_LANGS: ANY_LANG ? "semua bahasa" : LANGS,
       publicBase: publicBase(),
     },
@@ -297,7 +324,9 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
   let hash = null;
   try { for (const f of files.slice(0, 2)) { hash = await hashFor(f, apiKey); if (hash) break; } info.hash = hash || "(tidak ada / dilewati)"; }
   catch (e) { info.hash = "ERROR: " + e.message; }
-  const brief = (arr) => ({ jumlah: arr.length, contoh: arr.slice(0, 5).map((x) => `${x.lang} | ${x.release} | id ${x.key.slice(0, 20)}`) });
+  const brief = (arr) => ({ jumlah: arr.length, contoh: arr.slice(0, 5).map((x) => `${x.lang} | ${x.release} | ${x.src} ${String(x.key).slice(0, 40)}`) });
+  try { info.stremio_opensubtitles = STREM_OS ? brief(await searchStrem({ imdbId, season, episode, hash, size: files[0] && files[0].size, filename: files[0] && files[0].fileName })) : "dimatikan (STREM_OS=0)"; }
+  catch (e) { info.stremio_opensubtitles = "ERROR: " + e.message; }
   try { info.opensubtitles = OS_KEY ? brief(await searchOS({ imdbId, season, episode, hash })) : "API key belum diisi"; }
   catch (e) { info.opensubtitles = "ERROR: " + e.message; }
   if (!SUBDL_KEY) info.subdl = "API key belum diisi";
@@ -326,4 +355,4 @@ async function diagnose({ imdbId, season, episode, files = [], apiKey }) {
   return info;
 }
 
-module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { unzip, pickEntry, toUtf8, b64u, searchSubdl } };
+module.exports = { findSubtitles, getSrt, hashFor, diagnose, _t: { searchStrem, unzip, pickEntry, toUtf8, b64u, searchSubdl } };
