@@ -193,8 +193,10 @@ builder.defineStreamHandler(async ({ id }) => {
   if (prefix !== SERIES_ID) return { streams: [] };
   const eps = await getEpisodes();
   const key = `${+season}:${+episode}`;
-  const target = MAPPING[key] || key; // IMDb S:E -> S:E di nama file
-  const matches = eps.filter((e) => `${e.season}:${e.episode}` === target);
+  // IMDb S:E -> satu atau beberapa S:E di nama file ([] = sengaja tanpa file)
+  const mapped = MAPPING[key];
+  const targets = mapped === undefined ? [key] : [].concat(mapped);
+  const matches = eps.filter((e) => targets.includes(`${e.season}:${e.episode}`));
   return {
     streams: matches.map((e) => ({
       name: "Drive",
@@ -238,13 +240,17 @@ async function debugHtml() {
   out.push("", "== EPISODE IMDb -> FILE ==");
   for (const v of imdb) {
     const k = `${v.season}:${v.episode}`;
-    const target = MAPPING[k] || k;
-    const f = files.get(target);
-    const note = MAPPING[k] ? ` [mapping ${k} -> ${target}]` : "";
-    out.push(`S${v.season}E${v.episode} | ${v.date} | ${v.title}${note}\n     ${f ? f.join("\n     ") : "(TIDAK ADA FILE)"}`);
+    const mapped = MAPPING[k];
+    const targets = mapped === undefined ? [k] : [].concat(mapped);
+    const f = targets.flatMap((t) => files.get(t) || []);
+    const note = mapped !== undefined ? ` [mapping ${k} -> ${targets.join(", ") || "kosong"}]` : "";
+    out.push(`S${v.season}E${v.episode} | ${v.date} | ${v.title}${note}\n     ${f.length ? f.join("\n     ") : "(TIDAK ADA FILE)"}`);
   }
 
-  const used = new Set(imdb.map((v) => MAPPING[`${v.season}:${v.episode}`] || `${v.season}:${v.episode}`));
+  const used = new Set(imdb.flatMap((v) => {
+    const k = `${v.season}:${v.episode}`;
+    return MAPPING[k] === undefined ? [k] : [].concat(MAPPING[k]);
+  }));
   out.push("", "== FILE YANG TIDAK DIPAKAI EPISODE IMDb MANA PUN ==");
   for (const k of files.keys()) {
     if (!used.has(k)) out.push(`S${k.replace(":", "E")}: ${files.get(k).join(" | ")}`);
