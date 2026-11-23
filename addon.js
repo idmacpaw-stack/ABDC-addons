@@ -153,10 +153,9 @@ async function getCinemeta() {
 }
 
 // ---------- Thumbnail episode ----------
-// THUMB_SOURCE: "auto" (default) = thumbnail Cinemeta, kalau kosong pakai thumbnail video dari Drive,
-// kalau masih kosong pakai background/poster serial; "drive" = utamakan thumbnail video Drive;
-// "cinemeta" = hanya bawaan Cinemeta (tidak diubah).
-const THUMB_SOURCE = (process.env.THUMB_SOURCE || "auto").toLowerCase();
+// THUMB_SOURCE: "drive" (default) = thumbnail video dari Drive, kalau tidak ada pakai background/poster serial;
+// "auto" = utamakan thumbnail Cinemeta lalu Drive; "cinemeta" = hanya bawaan Cinemeta (tidak diubah).
+const THUMB_SOURCE = (process.env.THUMB_SOURCE || "drive").toLowerCase();
 // Dilayani lewat server sendiri (/thumb/<id>.jpg): link thumbnail Drive diambil segar tiap kali, dan kalau
 // Drive tidak punya thumbnail untuk file itu, otomatis diganti gambar background serial.
 const driveThumb = (fileId) => `${subs.publicBase()}/thumb/${fileId}.jpg`;
@@ -171,7 +170,8 @@ async function withThumbnails(cm) {
       const f = await filesFor(s, e).catch(() => []);
       if (f[0]) drive = driveThumb(f[0].fileId);
     }
-    const thumb = THUMB_SOURCE === "drive" ? (drive || v.thumbnail) : (v.thumbnail || drive);
+    // Default "drive": gambar episode Cinemeta (metahub.space) untuk serial ini rusak, jadi tidak dipakai.
+    const thumb = THUMB_SOURCE === "drive" ? drive : (v.thumbnail || drive);
     return { ...v, thumbnail: thumb || cm.background || cm.poster };
   }));
   return { ...cm, videos };
